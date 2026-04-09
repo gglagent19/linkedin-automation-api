@@ -56,6 +56,26 @@ def init_db():
         );
 
         CREATE INDEX IF NOT EXISTS idx_chat_user ON chat_messages(user_id);
+
+        CREATE TABLE IF NOT EXISTS user_config (
+            user_id TEXT PRIMARY KEY,
+            onboarded INTEGER DEFAULT 0,
+            goal TEXT DEFAULT '',
+            product_name TEXT DEFAULT '',
+            product_description TEXT DEFAULT '',
+            target_titles TEXT DEFAULT '[]',
+            target_industries TEXT DEFAULT '[]',
+            company_size_min INTEGER DEFAULT 50,
+            company_size_max INTEGER DEFAULT 500,
+            revenue_min TEXT DEFAULT '5000000',
+            revenue_max TEXT DEFAULT '100000000',
+            daily_schedule TEXT DEFAULT '[]',
+            automations TEXT DEFAULT '[]',
+            safety_rules TEXT DEFAULT '[]',
+            phase INTEGER DEFAULT 1,
+            updated_at TEXT NOT NULL DEFAULT '',
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
     """)
     conn.commit()
     conn.close()

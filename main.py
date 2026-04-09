@@ -56,6 +56,32 @@ class TaskUpdateRequest(BaseModel):
 class ChatRequest(BaseModel):
     message: str
 
+class OnboardingRequest(BaseModel):
+    goal: str
+    product_name: str = ""
+    product_description: str = ""
+    target_titles: list[str] = []
+    target_industries: list[str] = []
+    company_size_min: int = 50
+    company_size_max: int = 500
+    revenue_min: str = "5000000"
+    revenue_max: str = "100000000"
+
+class ConfigUpdateRequest(BaseModel):
+    goal: str | None = None
+    product_name: str | None = None
+    product_description: str | None = None
+    target_titles: list[str] | None = None
+    target_industries: list[str] | None = None
+    company_size_min: int | None = None
+    company_size_max: int | None = None
+    revenue_min: str | None = None
+    revenue_max: str | None = None
+    daily_schedule: list[dict] | None = None
+    automations: list[dict] | None = None
+    safety_rules: list[str] | None = None
+    phase: int | None = None
+
 
 # ── Auth Routes ──────────────────────────────────────────────────
 
@@ -316,6 +342,157 @@ def chat_history(limit: int = 50, user=Depends(get_current_user)):
     ).fetchall()
     conn.close()
     return {"messages": [dict(r) for r in rows]}
+
+
+# ── Onboarding & Config ──────────────────────────────────────────
+
+@app.get("/config")
+def get_config(user=Depends(get_current_user)):
+    """Get user's config. If not onboarded, returns onboarded=false."""
+    conn = get_db()
+    row = conn.execute("SELECT * FROM user_config WHERE user_id = ?", (user["id"],)).fetchone()
+    conn.close()
+
+    if not row:
+        return {"onboarded": False}
+
+    data = dict(row)
+    # Parse JSON fields
+    for field in ["target_titles", "target_industries", "daily_schedule", "automations", "safety_rules"]:
+        try:
+            data[field] = json.loads(data[field]) if data[field] else []
+        except (json.JSONDecodeError, TypeError):
+            data[field] = []
+    data["onboarded"] = bool(data.get("onboarded", 0))
+    return data
+
+
+@app.post("/config/onboard")
+def onboard(req: OnboardingRequest, user=Depends(get_current_user)):
+    """First-time onboarding -- saves the user's goal, ICP, and creates default automations."""
+    conn = get_db()
+    now = now_iso()
+
+    # Generate default automations based on their goal
+    default_automations = [
+        {"name": "Scrape Leads from Apollo", "role": "Lead Scraper", "description": f"Searches Apollo for {req.goal} prospects matching your ICP. Pulls LinkedIn URLs and work emails.", "frequency": "75-400/day", "action": "scrape_apollo", "enabled": True},
+        {"name": "Target Scraped Leads", "role": "Lead Targeter", "description": "Qualifies, enriches, and generates personalized messages for scraped leads.", "frequency": "After scrape", "action": "target_leads", "enabled": True},
+        {"name": "Generate LinkedIn Post", "role": "Content Creator", "description": f"Writes thought-leadership posts about {req.product_name or 'your product'} to attract inbound leads.", "frequency": "1-2x/day", "action": "generate_post", "enabled": True},
+        {"name": "Send Connection Requests", "role": "Network Builder", "description": "Sends personalized connection notes to target leads. Each under 300 chars.", "frequency": "7-22/day", "action": "send_connection_request", "enabled": True},
+        {"name": "Reply to Comments", "role": "Engagement Manager", "description": "Monitors posts and replies to comments to boost visibility.", "frequency": "As needed", "action": "reply_comments", "enabled": True},
+        {"name": "View Profiles", "role": "Presence Builder", "description": "Visits target profiles so they see your name before outreach.", "frequency": "20-70/day", "action": "view_profiles", "enabled": True},
+        {"name": "Send Cold Emails", "role": "Email Outreach", "description": f"Personalized emails about {req.product_name or 'your product'} via Instantly.", "frequency": "25-120/day", "action": "send_emails", "enabled": True},
+        {"name": "Manage Conversations", "role": "Conversation Manager", "description": "Handles LinkedIn and email replies from prospects.", "frequency": "2-3x/day", "action": "manage_conversations", "enabled": True},
+        {"name": "Book Meetings", "role": "Meeting Scheduler", "description": f"Converts interested prospects into {req.goal} demos/calls.", "frequency": "As needed", "action": "book_meetings", "enabled": True},
+        {"name": "Analyze Performance", "role": "Analytics Agent", "description": "Tracks connections, acceptance rate, replies, meetings booked.", "frequency": "End of day", "action": "analyze_performance", "enabled": True},
+        {"name": "Post Engagement", "role": "Social Warmer", "description": "Likes and comments on prospects' posts before outreach.", "frequency": "10-20/day", "action": "post_engagement", "enabled": True},
+    ]
+
+    default_schedule = [
+        {"time": "9:00 AM", "step": "Review strategy & confirm daily plan"},
+        {"time": "9:15 AM", "step": "Scrape new leads from Apollo"},
+        {"time": "9:30 AM", "step": "Qualify and score leads against ICP"},
+        {"time": "9:45 AM", "step": "Enrich lead data"},
+        {"time": "10:00 AM", "step": "View target profiles (warm-up)"},
+        {"time": "10:30 AM", "step": "Like & comment on prospects' posts"},
+        {"time": "11:00 AM", "step": "Send personalized connection requests"},
+        {"time": "12:00 PM", "step": "Send cold emails"},
+        {"time": "1:00 PM", "step": "Check & reply to LinkedIn messages"},
+        {"time": "2:00 PM", "step": "Check & reply to email responses"},
+        {"time": "3:00 PM", "step": "Generate and publish LinkedIn post"},
+        {"time": "3:30 PM", "step": "Reply to comments on your posts"},
+        {"time": "4:00 PM", "step": f"Follow up hot prospects / book {req.goal}"},
+        {"time": "4:30 PM", "step": "Daily performance analysis"},
+        {"time": "5:00 PM", "step": "Save insights, end day"},
+    ]
+
+    default_rules = [
+        "No weekends in Phase 1",
+        "No duplicate messages ever",
+        "Pause immediately on LinkedIn warning",
+        "Minimum 30% connection acceptance rate",
+        "All messages must be personalized",
+        f"Goal: {req.goal}",
+    ]
+
+    # Check if already exists
+    existing = conn.execute("SELECT user_id FROM user_config WHERE user_id = ?", (user["id"],)).fetchone()
+
+    if existing:
+        conn.execute("""
+            UPDATE user_config SET
+                onboarded = 1, goal = ?, product_name = ?, product_description = ?,
+                target_titles = ?, target_industries = ?,
+                company_size_min = ?, company_size_max = ?,
+                revenue_min = ?, revenue_max = ?,
+                daily_schedule = ?, automations = ?, safety_rules = ?,
+                updated_at = ?
+            WHERE user_id = ?
+        """, (
+            req.goal, req.product_name, req.product_description,
+            json.dumps(req.target_titles), json.dumps(req.target_industries),
+            req.company_size_min, req.company_size_max,
+            req.revenue_min, req.revenue_max,
+            json.dumps(default_schedule), json.dumps(default_automations), json.dumps(default_rules),
+            now, user["id"],
+        ))
+    else:
+        conn.execute("""
+            INSERT INTO user_config (
+                user_id, onboarded, goal, product_name, product_description,
+                target_titles, target_industries,
+                company_size_min, company_size_max,
+                revenue_min, revenue_max,
+                daily_schedule, automations, safety_rules, updated_at
+            ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            user["id"], req.goal, req.product_name, req.product_description,
+            json.dumps(req.target_titles), json.dumps(req.target_industries),
+            req.company_size_min, req.company_size_max,
+            req.revenue_min, req.revenue_max,
+            json.dumps(default_schedule), json.dumps(default_automations), json.dumps(default_rules),
+            now,
+        ))
+
+    conn.commit()
+    conn.close()
+
+    return {
+        "onboarded": True,
+        "automations_count": len(default_automations),
+        "schedule_steps": len(default_schedule),
+        "rules_count": len(default_rules),
+    }
+
+
+@app.put("/config")
+def update_config(req: ConfigUpdateRequest, user=Depends(get_current_user)):
+    """Update specific config fields."""
+    conn = get_db()
+    now = now_iso()
+
+    updates = []
+    params = []
+    for field, value in req.dict(exclude_none=True).items():
+        if isinstance(value, (list, dict)):
+            updates.append(f"{field} = ?")
+            params.append(json.dumps(value))
+        else:
+            updates.append(f"{field} = ?")
+            params.append(value)
+
+    if not updates:
+        conn.close()
+        return {"updated": False}
+
+    updates.append("updated_at = ?")
+    params.append(now)
+    params.append(user["id"])
+
+    conn.execute(f"UPDATE user_config SET {', '.join(updates)} WHERE user_id = ?", params)
+    conn.commit()
+    conn.close()
+    return {"updated": True}
 
 
 # ── Health ───────────────────────────────────────────────────────
