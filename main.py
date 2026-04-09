@@ -67,6 +67,10 @@ class OnboardingRequest(BaseModel):
     revenue_min: str = "5000000"
     revenue_max: str = "100000000"
 
+class ResearchRequest(BaseModel):
+    website: str
+    goal: str
+
 class ApolloKeyRequest(BaseModel):
     apollo_api_key: str
 
@@ -349,6 +353,253 @@ def chat_history(limit: int = 50, user=Depends(get_current_user)):
     ).fetchall()
     conn.close()
     return {"messages": [dict(r) for r in rows]}
+
+
+# ── Research Agent ────────────────────────────────────────────────
+
+def scrape_website(url: str) -> dict:
+    """Scrape a website and extract product/company info."""
+    import requests as http_requests
+    import re
+
+    if not url.startswith("http"):
+        url = "https://" + url
+
+    try:
+        resp = http_requests.get(url, timeout=15, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        })
+        html = resp.text[:50000]  # limit to 50k chars
+
+        # Extract title
+        title_match = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+        title = title_match.group(1).strip() if title_match else ""
+
+        # Extract meta description
+        desc_match = re.search(r'<meta[^>]*name=["\']description["\'][^>]*content=["\'](.*?)["\']', html, re.IGNORECASE)
+        if not desc_match:
+            desc_match = re.search(r'<meta[^>]*content=["\'](.*?)["\'][^>]*name=["\']description["\']', html, re.IGNORECASE)
+        description = desc_match.group(1).strip() if desc_match else ""
+
+        # Extract h1s and h2s for understanding the product
+        h1s = re.findall(r"<h1[^>]*>(.*?)</h1>", html, re.IGNORECASE | re.DOTALL)
+        h2s = re.findall(r"<h2[^>]*>(.*?)</h2>", html, re.IGNORECASE | re.DOTALL)
+
+        # Clean HTML tags from headings
+        def clean(text):
+            return re.sub(r"<[^>]+>", "", text).strip()
+
+        h1s = [clean(h) for h in h1s[:5] if clean(h)]
+        h2s = [clean(h) for h in h2s[:10] if clean(h)]
+
+        # Extract visible text snippets (paragraphs)
+        paragraphs = re.findall(r"<p[^>]*>(.*?)</p>", html, re.IGNORECASE | re.DOTALL)
+        paragraphs = [clean(p) for p in paragraphs if len(clean(p)) > 30][:10]
+
+        # Try to find company name from domain
+        from urllib.parse import urlparse
+        domain = urlparse(url).netloc.replace("www.", "")
+        company_name = domain.split(".")[0].capitalize()
+
+        return {
+            "url": url,
+            "company_name": company_name,
+            "title": title,
+            "description": description,
+            "headings": h1s + h2s,
+            "key_paragraphs": paragraphs,
+            "scraped": True,
+        }
+    except Exception as e:
+        return {"url": url, "scraped": False, "error": str(e)}
+
+
+def generate_strategy(website_data: dict, goal: str) -> dict:
+    """Generate ICP, strategy, automations based on website research and goal."""
+
+    company = website_data.get("company_name", "")
+    description = website_data.get("description", "")
+    headings = website_data.get("headings", [])
+    paragraphs = website_data.get("key_paragraphs", [])
+
+    # Combine all text for analysis
+    all_text = f"{description} {' '.join(headings)} {' '.join(paragraphs)}".lower()
+
+    # Detect product category
+    product_category = "B2B Software"
+    category_signals = {
+        "partner": "Partner/Channel Management",
+        "channel": "Partner/Channel Management",
+        "alliance": "Partner/Channel Management",
+        "crm": "CRM/Sales",
+        "sales": "Sales Enablement",
+        "marketing": "Marketing Platform",
+        "security": "Cybersecurity",
+        "cyber": "Cybersecurity",
+        "cloud": "Cloud Infrastructure",
+        "hr": "HR Technology",
+        "recruit": "HR Technology",
+        "finance": "Financial Technology",
+        "payment": "Financial Technology",
+        "analytics": "Data & Analytics",
+        "data": "Data & Analytics",
+        "ai": "AI/ML Platform",
+        "automat": "Automation Platform",
+        "ecommerce": "E-commerce",
+        "health": "HealthTech",
+        "educ": "EdTech",
+        "learn": "EdTech",
+    }
+    for signal, category in category_signals.items():
+        if signal in all_text:
+            product_category = category
+            break
+
+    # Generate ICP titles based on category and goal
+    title_map = {
+        "Partner/Channel Management": ["VP of Partnerships", "VP of Channel Sales", "VP of Alliances", "Director of Partner Programs", "Head of Channel", "Director of Business Development", "Chief Revenue Officer", "SVP Partnerships"],
+        "CRM/Sales": ["VP of Sales", "Head of Sales Operations", "Director of Revenue Operations", "Chief Revenue Officer", "VP of Business Development", "Sales Director"],
+        "Sales Enablement": ["VP of Sales", "VP of Sales Enablement", "Head of Revenue Operations", "Director of Sales", "Chief Revenue Officer"],
+        "Marketing Platform": ["VP of Marketing", "CMO", "Head of Digital Marketing", "Director of Demand Gen", "Head of Growth", "Director of Marketing"],
+        "Cybersecurity": ["CISO", "VP of Security", "Head of IT Security", "Director of InfoSec", "CTO", "VP of Engineering"],
+        "Cloud Infrastructure": ["CTO", "VP of Engineering", "Head of DevOps", "Director of Infrastructure", "VP of IT"],
+        "HR Technology": ["VP of HR", "CHRO", "Head of People Operations", "Director of Talent", "VP of People"],
+        "Financial Technology": ["CFO", "VP of Finance", "Head of Treasury", "Director of Financial Operations"],
+        "Data & Analytics": ["Chief Data Officer", "VP of Analytics", "Head of Data", "Director of BI", "VP of Engineering"],
+        "AI/ML Platform": ["CTO", "VP of Engineering", "Head of AI/ML", "Chief Data Officer", "VP of Product"],
+        "Automation Platform": ["COO", "VP of Operations", "Head of Process Automation", "Director of Digital Transformation"],
+        "E-commerce": ["VP of E-commerce", "Head of Digital", "Director of Online Sales", "CMO"],
+        "HealthTech": ["CTO", "VP of Product", "Chief Medical Officer", "Head of Digital Health"],
+        "EdTech": ["VP of Product", "Head of Curriculum", "Director of EdTech", "CTO"],
+    }
+    target_titles = title_map.get(product_category, ["VP of Sales", "CTO", "Director of Business Development", "Head of Growth", "CMO", "COO"])
+
+    # Generate industries based on product
+    industry_map = {
+        "Partner/Channel Management": ["SaaS", "Cybersecurity", "Cloud Infrastructure", "IT Services", "MarTech", "HR Tech", "FinTech"],
+        "Cybersecurity": ["Financial Services", "Healthcare", "Government", "Technology", "Retail", "Manufacturing"],
+        "Marketing Platform": ["SaaS", "E-commerce", "Retail", "Media", "Technology", "Consumer Brands"],
+        "HR Technology": ["Technology", "Financial Services", "Healthcare", "Retail", "Manufacturing", "Professional Services"],
+    }
+    target_industries = industry_map.get(product_category, ["SaaS", "Technology", "Financial Services", "Healthcare", "Professional Services", "Manufacturing", "Retail"])
+
+    # Generate strategy based on goal
+    goal_lower = goal.lower()
+    if "demo" in goal_lower or "book" in goal_lower:
+        strategy_focus = "demo bookings"
+        outreach_tone = "Value-first, offer a quick 15-min demo"
+    elif "client" in goal_lower or "customer" in goal_lower:
+        strategy_focus = "client acquisition"
+        outreach_tone = "Consultative, focus on solving their pain points"
+    elif "partner" in goal_lower:
+        strategy_focus = "partnership development"
+        outreach_tone = "Collaborative, mutual value proposition"
+    elif "sale" in goal_lower or "revenue" in goal_lower:
+        strategy_focus = "revenue generation"
+        outreach_tone = "ROI-focused, data-driven value prop"
+    else:
+        strategy_focus = goal
+        outreach_tone = "Professional, personalized, value-first"
+
+    # Build automations customized to their product
+    automations = [
+        {"name": "Scrape Leads from Apollo", "role": "Lead Scraper", "description": f"Searches Apollo for {product_category} buyers matching your ICP. Pulls LinkedIn URLs and work emails for {', '.join(target_titles[:3])} and similar roles.", "frequency": "75-400/day", "action": "scrape_apollo", "enabled": True},
+        {"name": "Target Scraped Leads", "role": "Lead Targeter", "description": f"Qualifies leads, enriches data, generates personalized messages about {company} for {strategy_focus}.", "frequency": "After scrape", "action": "target_leads", "enabled": True},
+        {"name": f"Generate LinkedIn Post", "role": "Content Creator", "description": f"Writes thought-leadership posts about {product_category} trends to attract {', '.join(target_titles[:2])} and build authority.", "frequency": "1-2x/day", "action": "generate_post", "enabled": True},
+        {"name": "Send Connection Requests", "role": "Network Builder", "description": f"Sends personalized connection notes to {product_category} buyers. Each note mentions their role, company, and a {strategy_focus} angle.", "frequency": "7-22/day", "action": "send_connection_request", "enabled": True},
+        {"name": "Reply to Comments", "role": "Engagement Manager", "description": "Monitors your posts and replies to comments to boost visibility and engagement.", "frequency": "As needed", "action": "reply_comments", "enabled": True},
+        {"name": "View Profiles", "role": "Presence Builder", "description": "Visits target profiles so they see your name before you reach out. Increases acceptance rates.", "frequency": "20-70/day", "action": "view_profiles", "enabled": True},
+        {"name": "Send Cold Emails", "role": "Email Outreach", "description": f"Personalized cold emails about {company} focused on {strategy_focus}. Tone: {outreach_tone}.", "frequency": "25-120/day", "action": "send_emails", "enabled": True},
+        {"name": "Manage Conversations", "role": "Conversation Manager", "description": "Handles LinkedIn and email replies. Categorizes as interested/not now/not interested.", "frequency": "2-3x/day", "action": "manage_conversations", "enabled": True},
+        {"name": f"Book {strategy_focus.title()}", "role": "Meeting Scheduler", "description": f"Converts interested prospects into {strategy_focus}. Sends calendar links and follows up.", "frequency": "As opportunities arise", "action": "book_meetings", "enabled": True},
+        {"name": "Analyze Performance", "role": "Analytics Agent", "description": "Tracks daily metrics: connections, acceptance rate, replies, emails opened, meetings booked.", "frequency": "End of day", "action": "analyze_performance", "enabled": True},
+        {"name": "Post Engagement", "role": "Social Warmer", "description": "Likes and comments on prospects' posts before sending connection requests.", "frequency": "10-20/day", "action": "post_engagement", "enabled": True},
+    ]
+
+    schedule = [
+        {"time": "9:00 AM", "step": f"Review {strategy_focus} strategy & daily plan"},
+        {"time": "9:15 AM", "step": f"Scrape new {product_category} leads from Apollo"},
+        {"time": "9:30 AM", "step": "Qualify and score leads against ICP"},
+        {"time": "9:45 AM", "step": "Enrich lead data (company, revenue, tech stack)"},
+        {"time": "10:00 AM", "step": "View target profiles (warm-up)"},
+        {"time": "10:30 AM", "step": "Like & comment on prospects' posts"},
+        {"time": "11:00 AM", "step": "Send personalized connection requests"},
+        {"time": "12:00 PM", "step": f"Send cold emails about {company}"},
+        {"time": "1:00 PM", "step": "Check & reply to LinkedIn messages"},
+        {"time": "2:00 PM", "step": "Check & reply to email responses"},
+        {"time": "3:00 PM", "step": f"Publish LinkedIn post about {product_category}"},
+        {"time": "3:30 PM", "step": "Reply to comments on your posts"},
+        {"time": "4:00 PM", "step": f"Follow up hot prospects / book {strategy_focus}"},
+        {"time": "4:30 PM", "step": "Daily performance analysis & report"},
+        {"time": "5:00 PM", "step": "Save insights, end day"},
+    ]
+
+    safety_rules = [
+        "No weekends in Phase 1 (warm-up period)",
+        "No duplicate messages ever",
+        "Pause immediately on LinkedIn warning",
+        "Minimum 30% connection acceptance rate",
+        "All messages must be personalized",
+        f"Tone: {outreach_tone}",
+        f"Goal: {goal}",
+    ]
+
+    return {
+        "product_name": company,
+        "product_description": description or f"{company} - {product_category}",
+        "product_category": product_category,
+        "target_titles": target_titles,
+        "target_industries": target_industries,
+        "company_size_min": 50,
+        "company_size_max": 500,
+        "revenue_min": "5000000",
+        "revenue_max": "100000000",
+        "strategy_focus": strategy_focus,
+        "outreach_tone": outreach_tone,
+        "automations": automations,
+        "daily_schedule": schedule,
+        "safety_rules": safety_rules,
+    }
+
+
+@app.post("/research")
+def research_website(req: ResearchRequest, user=Depends(get_current_user)):
+    """Research a website and generate a complete automation strategy.
+
+    The user provides their website URL and goal.
+    The agent scrapes the site, understands the product, and generates:
+    - ICP (titles, industries, company size)
+    - Automations customized to the product
+    - Daily schedule
+    - Safety rules
+    - Outreach strategy and tone
+
+    Returns everything for user approval before saving.
+    """
+    # Step 1: Scrape the website
+    website_data = scrape_website(req.website)
+
+    if not website_data.get("scraped"):
+        return {
+            "success": False,
+            "error": f"Could not reach {req.website}: {website_data.get('error', 'Unknown error')}",
+        }
+
+    # Step 2: Generate strategy
+    strategy = generate_strategy(website_data, req.goal)
+
+    return {
+        "success": True,
+        "website_data": {
+            "url": website_data["url"],
+            "company_name": website_data["company_name"],
+            "title": website_data["title"],
+            "description": website_data["description"],
+            "headings": website_data["headings"][:5],
+        },
+        "proposed_strategy": strategy,
+        "message": f"I've researched {website_data['company_name']} and created a {strategy['strategy_focus']} strategy targeting {len(strategy['target_titles'])} roles across {len(strategy['target_industries'])} industries. Review below and approve to start.",
+    }
 
 
 # ── Onboarding & Config ──────────────────────────────────────────
