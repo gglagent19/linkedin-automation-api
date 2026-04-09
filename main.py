@@ -67,6 +67,13 @@ class OnboardingRequest(BaseModel):
     revenue_min: str = "5000000"
     revenue_max: str = "100000000"
 
+class ApolloKeyRequest(BaseModel):
+    apollo_api_key: str
+
+class InstantlyKeyRequest(BaseModel):
+    instantly_api_key: str
+    instantly_campaign_id: str = ""
+
 class ConfigUpdateRequest(BaseModel):
     goal: str | None = None
     product_name: str | None = None
@@ -493,6 +500,109 @@ def update_config(req: ConfigUpdateRequest, user=Depends(get_current_user)):
     conn.commit()
     conn.close()
     return {"updated": True}
+
+
+# ── Integrations (API Keys) ──────────────────────────────────────
+
+@app.post("/integrations/apollo")
+def connect_apollo(req: ApolloKeyRequest, user=Depends(get_current_user)):
+    """Validate and save Apollo API key. Tests it by making a real API call."""
+    import requests as http_requests
+
+    # Test the key with Apollo's API
+    try:
+        resp = http_requests.post(
+            "https://api.apollo.io/v1/mixed_people/search",
+            json={
+                "api_key": req.apollo_api_key,
+                "per_page": 1,
+                "person_titles": ["CEO"],
+            },
+            headers={"Content-Type": "application/json"},
+            timeout=10,
+        )
+
+        if resp.status_code == 200 and resp.json().get("people") is not None:
+            # Key is valid -- save it
+            conn = get_db()
+            now = now_iso()
+            existing = conn.execute("SELECT user_id FROM user_config WHERE user_id = ?", (user["id"],)).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE user_config SET apollo_api_key = ?, apollo_connected = 1, updated_at = ? WHERE user_id = ?",
+                    (req.apollo_api_key, now, user["id"]),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO user_config (user_id, apollo_api_key, apollo_connected, updated_at) VALUES (?, ?, 1, ?)",
+                    (user["id"], req.apollo_api_key, now),
+                )
+            conn.commit()
+            conn.close()
+            return {"connected": True, "message": "Apollo connected successfully!"}
+        else:
+            return {"connected": False, "message": "Invalid API key. Check your Apollo dashboard for the correct key."}
+    except http_requests.Timeout:
+        return {"connected": False, "message": "Apollo API timed out. Try again."}
+    except Exception as e:
+        return {"connected": False, "message": f"Connection failed: {str(e)}"}
+
+
+@app.post("/integrations/instantly")
+def connect_instantly(req: InstantlyKeyRequest, user=Depends(get_current_user)):
+    """Validate and save Instantly API key."""
+    import requests as http_requests
+
+    try:
+        resp = http_requests.get(
+            "https://api.instantly.ai/api/v1/campaign/list",
+            params={"api_key": req.instantly_api_key},
+            timeout=10,
+        )
+
+        if resp.status_code == 200:
+            conn = get_db()
+            now = now_iso()
+            existing = conn.execute("SELECT user_id FROM user_config WHERE user_id = ?", (user["id"],)).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE user_config SET instantly_api_key = ?, instantly_campaign_id = ?, instantly_connected = 1, updated_at = ? WHERE user_id = ?",
+                    (req.instantly_api_key, req.instantly_campaign_id, now, user["id"]),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO user_config (user_id, instantly_api_key, instantly_campaign_id, instantly_connected, updated_at) VALUES (?, ?, ?, 1, ?)",
+                    (user["id"], req.instantly_api_key, req.instantly_campaign_id, now),
+                )
+            conn.commit()
+            conn.close()
+            return {"connected": True, "message": "Instantly connected successfully!"}
+        else:
+            return {"connected": False, "message": "Invalid API key. Check your Instantly dashboard."}
+    except Exception as e:
+        return {"connected": False, "message": f"Connection failed: {str(e)}"}
+
+
+@app.get("/integrations")
+def get_integrations(user=Depends(get_current_user)):
+    """Get connection status of all integrations (never returns actual keys)."""
+    conn = get_db()
+    row = conn.execute(
+        "SELECT apollo_connected, instantly_connected, instantly_campaign_id FROM user_config WHERE user_id = ?",
+        (user["id"],),
+    ).fetchone()
+    conn.close()
+
+    if not row:
+        return {"apollo": {"connected": False}, "instantly": {"connected": False}}
+
+    return {
+        "apollo": {"connected": bool(row["apollo_connected"])},
+        "instantly": {
+            "connected": bool(row["instantly_connected"]),
+            "campaign_id": row["instantly_campaign_id"] or "",
+        },
+    }
 
 
 # ── Health ───────────────────────────────────────────────────────

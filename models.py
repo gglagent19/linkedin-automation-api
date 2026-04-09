@@ -73,6 +73,11 @@ def init_db():
             automations TEXT DEFAULT '[]',
             safety_rules TEXT DEFAULT '[]',
             phase INTEGER DEFAULT 1,
+            apollo_api_key TEXT DEFAULT '',
+            apollo_connected INTEGER DEFAULT 0,
+            instantly_api_key TEXT DEFAULT '',
+            instantly_campaign_id TEXT DEFAULT '',
+            instantly_connected INTEGER DEFAULT 0,
             updated_at TEXT NOT NULL DEFAULT '',
             FOREIGN KEY (user_id) REFERENCES users(id)
         );
